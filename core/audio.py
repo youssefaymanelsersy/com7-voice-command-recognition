@@ -147,7 +147,7 @@ def print_input_devices():
             f"[{dev['index']}] {dev['name']} | "
             f"Host API: {dev['hostapi']} | "
             f"Input channels: {dev['max_input_channels']}{default_tag}"
-                    f"Invalid input device '{selected_device}'. Use main.py (option 9 -> option 2) or print_input_devices() to see valid microphones."
+                    f"Invalid input device '{selected_device}'. Use main.py (option 9 -> option 2) or print_input_devices() to see valid microphones.")
 
 
 def _find_usb_input_device():
