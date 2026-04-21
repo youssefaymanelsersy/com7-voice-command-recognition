@@ -2,7 +2,9 @@ import numpy as np
 from scipy.fft import fft
 from scipy.fftpack import fftfreq
 
-FS = 44100
+from core.app_config import AUDIO_SAMPLE_RATE
+
+FS = AUDIO_SAMPLE_RATE
 
 
 def remove_silence(signal, threshold=0.02):

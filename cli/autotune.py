@@ -1,18 +1,20 @@
 import json
 import time
+from pathlib import Path
 
 import numpy as np
 
-from audio import record_audio, using_serial_input
-from features import extract_features
+from core.export_model_header import export_voice_model_header
+from core.features import extract_features
+from core.recognize import recognize_features
 
 
 COMMANDS = ["on", "off", "start", "stop", "left", "right", "up", "down"]
 FEATURE_ORDER = ["zcr", "energy", "length", "spectral_centroid"]
 
-TEST_DATASET_FILE = "test_samples.json"
-MAIN_DATASET_FILE = "samples.json"
-MODEL_FILE = "model.json"
+TEST_DATASET_FILE = "data/test_samples.json"
+MAIN_DATASET_FILE = "data/samples.json"
+MODEL_FILE = "models/model.json"
 SAMPLES_PER_COMMAND = 10
 
 
@@ -40,11 +42,13 @@ def build_model_from_samples(sample_database, params):
         "meta": {
             "feature_order": FEATURE_ORDER,
             "feature_weights": params["feature_weights"],
+            "feature_floors": params.get("feature_floors", {}),
             "k_neighbors": params["k_neighbors"],
             "unknown_threshold": params["unknown_threshold"],
             "min_margin": params["min_margin"],
         },
         "feature_stats": {},
+        "command_stats": {},
         "commands": {},
     }
 
@@ -64,6 +68,16 @@ def build_model_from_samples(sample_database, params):
 
         all_vectors.extend(vectors)
         centroid = np.mean(vectors, axis=0).tolist()
+        cmd_arr = np.array(vectors, dtype=np.float64)
+
+        stats = {}
+        for i, feature in enumerate(FEATURE_ORDER):
+            stats[feature] = {
+                "mean": float(np.mean(cmd_arr[:, i])),
+                "std": float(np.std(cmd_arr[:, i]) + 1e-6),
+            }
+
+        model["command_stats"][cmd] = stats
         model["commands"][cmd] = {
             "samples": vectors,
             "centroid": [float(v) for v in centroid],
@@ -111,97 +125,7 @@ def _normalize_vector(vector, feature_stats):
 
 
 def predict_feature_vector(feature_vector, model):
-    meta = model.get("meta", {})
-    commands = model.get("commands", {})
-    feature_stats = model.get("feature_stats", {})
-
-    if not commands:
-        return "unknown"
-
-    weights = meta.get("feature_weights", {})
-    weight_arr = np.array([float(weights.get(f, 1.0)) for f in FEATURE_ORDER], dtype=np.float64)
-
-    k = int(meta.get("k_neighbors", 5))
-    unknown_threshold = float(meta.get("unknown_threshold", 6.5))
-    min_margin = float(meta.get("min_margin", 0.08))
-
-    query = _normalize_vector(feature_vector, feature_stats)
-
-    centroid_scores = []
-    for cmd, info in commands.items():
-        centroid = info.get("centroid")
-        if not centroid:
-            continue
-        centroid_vec = _normalize_vector(centroid, feature_stats)
-        centroid_dist = float(np.sum(np.abs(query - centroid_vec) * weight_arr))
-        centroid_scores.append((centroid_dist, cmd))
-
-    if not centroid_scores:
-        return "unknown"
-
-    centroid_scores.sort(key=lambda item: item[0])
-    centroid_best_dist, centroid_best_cmd = centroid_scores[0]
-    centroid_second_dist = centroid_scores[1][0] if len(centroid_scores) > 1 else float("inf")
-    centroid_confident = (
-        centroid_best_dist <= unknown_threshold
-        and (centroid_second_dist - centroid_best_dist) >= 0.05
-    )
-
-    neighbors = []
-    for cmd, info in commands.items():
-        for sample in info.get("samples", []):
-            sample_norm = _normalize_vector(sample, feature_stats)
-            dist = float(np.sum(np.abs(query - sample_norm) * weight_arr))
-            neighbors.append((dist, cmd))
-
-    if not neighbors:
-        return centroid_best_cmd if centroid_confident else "unknown"
-
-    neighbors.sort(key=lambda x: x[0])
-    k = max(1, min(k, len(neighbors)))
-    top_k = neighbors[:k]
-
-    cmd_scores = {}
-    cmd_distances = {}
-    cmd_counts = {}
-    for dist, cmd in top_k:
-        score = 1.0 / (dist + 1e-6)
-        cmd_scores[cmd] = cmd_scores.get(cmd, 0.0) + score
-        cmd_distances.setdefault(cmd, []).append(dist)
-        cmd_counts[cmd] = cmd_counts.get(cmd, 0) + 1
-
-    ranked = sorted(cmd_scores.items(), key=lambda item: item[1], reverse=True)
-    best_cmd, best_vote = ranked[0]
-    second_vote = ranked[1][1] if len(ranked) > 1 else 0.0
-    best_count = cmd_counts.get(best_cmd, 0)
-
-    ranked_by_dist = sorted(
-        ((cmd, float(np.mean(dists))) for cmd, dists in cmd_distances.items()),
-        key=lambda item: item[1],
-    )
-    best_mean_dist = ranked_by_dist[0][1]
-    second_mean_dist = ranked_by_dist[1][1] if len(ranked_by_dist) > 1 else float("inf")
-    best_dist = top_k[0][0]
-
-    if best_dist > unknown_threshold:
-        return centroid_best_cmd if centroid_confident else "unknown"
-
-    if best_count >= 3:
-        return centroid_best_cmd if centroid_confident else best_cmd
-
-    if (best_vote - second_vote) < min_margin:
-        return centroid_best_cmd if centroid_confident else "unknown"
-
-    if second_mean_dist < float("inf") and (second_mean_dist - best_mean_dist) < 0.06:
-        return centroid_best_cmd if centroid_confident else "unknown"
-
-    directional = {"left", "right"}
-    if best_cmd in directional and len(ranked_by_dist) > 1:
-        second_cmd = ranked_by_dist[1][0]
-        if second_cmd in directional and (ranked_by_dist[1][1] - ranked_by_dist[0][1]) < 0.2:
-            return centroid_best_cmd if centroid_confident else "unknown"
-
-    return centroid_best_cmd if centroid_confident else best_cmd
+    return recognize_features(feature_vector, model)
 
 
 def loocv_score(sample_database, params):
@@ -277,7 +201,74 @@ def search_best_params(sample_database):
     return best, best_metrics
 
 
+def validation_score(train_database, validation_database, params):
+    model = build_model_from_samples(train_database, params)
+    total = 0
+    correct = 0
+    unknown = 0
+
+    for cmd in COMMANDS:
+        for sample in validation_database.get(cmd, []):
+            feature_vec = [float(sample.get(f, 0.0)) for f in FEATURE_ORDER]
+            pred = predict_feature_vector(feature_vec, model)
+            total += 1
+            if pred == cmd:
+                correct += 1
+            if pred == "unknown":
+                unknown += 1
+
+    acc = (correct / total) if total else 0.0
+    unk = (unknown / total) if total else 0.0
+    unknown_bonus = 0.05 * min(unk, 0.15)
+    excessive_unknown_penalty = 0.25 * max(0.0, unk - 0.15)
+    objective = acc + unknown_bonus - excessive_unknown_penalty
+    return {
+        "accuracy": acc,
+        "unknown_rate": unk,
+        "objective": objective,
+    }
+
+
+def search_best_validation_params(train_database, validation_database):
+    grid = []
+    for zcr_w in [1.5, 2.0, 2.5, 3.0]:
+        for energy_w in [0.0, 0.4]:
+            for len_w in [0.8, 1.4, 2.0]:
+                for cent_w in [0.8, 1.4, 2.0, 2.8]:
+                    for k in [1, 3, 5]:
+                        for thr in [3.5, 5.0, 6.5, 8.0, 10.0]:
+                            for margin in [0.02, 0.05, 0.1]:
+                                grid.append(
+                                    {
+                                        "feature_weights": {
+                                            "zcr": zcr_w,
+                                            "energy": energy_w,
+                                            "length": len_w,
+                                            "spectral_centroid": cent_w,
+                                        },
+                                        "k_neighbors": k,
+                                        "unknown_threshold": thr,
+                                        "min_margin": margin,
+                                    }
+                                )
+
+    best = None
+    best_metrics = None
+    for idx, params in enumerate(grid, start=1):
+        metrics = validation_score(train_database, validation_database, params)
+        if best is None or metrics["objective"] > best_metrics["objective"]:
+            best = params
+            best_metrics = metrics
+
+        if idx % 500 == 0:
+            print(f"Checked {idx}/{len(grid)} configs...")
+
+    return best, best_metrics
+
+
 def record_80_samples(output_file=TEST_DATASET_FILE):
+    from audio import record_audio, using_serial_input
+
     serial_mode = using_serial_input()
     print("Recording 10 samples per command (80 total).")
     print("Speak clearly and consistently.\n")
@@ -334,8 +325,10 @@ def load_dataset(dataset_file=TEST_DATASET_FILE):
 
 
 def save_model(model):
+    Path(MODEL_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(MODEL_FILE, "w") as f:
         json.dump(model, f, indent=2)
+    export_voice_model_header(MODEL_FILE)
 
 
 def main():
@@ -343,14 +336,32 @@ def main():
     print(f"Main dataset is preserved in: {MAIN_DATASET_FILE}")
     print(f"Autotune dataset file is: {TEST_DATASET_FILE}")
     print("1. Record 80 test samples (10 per command) and tune model")
-    print("2. Tune model from existing test_samples.json")
-    print("3. Tune model from main samples.json (read-only)")
-    choice = input("Choose (1/2/3): ").strip()
+    print("2. Tune model from existing data/test_samples.json")
+    print("3. Tune model from main data/samples.json (read-only)")
+    print("4. Tune model on data/samples.json and validate with data/test_samples.json")
+    choice = input("Choose (1/2/3/4): ").strip()
 
     if choice == "1":
         db = record_80_samples(TEST_DATASET_FILE)
     elif choice == "2":
         db = load_dataset(TEST_DATASET_FILE)
+    elif choice == "4":
+        train_db = load_dataset(MAIN_DATASET_FILE)
+        validation_db = load_dataset(TEST_DATASET_FILE)
+        print("\nRunning validation parameter search...")
+        best_params, metrics = search_best_validation_params(train_db, validation_db)
+        print("\nBEST CONFIG")
+        print(json.dumps(best_params, indent=2))
+        print(
+            "Validation estimate: "
+            f"accuracy={metrics['accuracy']*100:.1f}% | "
+            f"unknown={metrics['unknown_rate']*100:.1f}% | "
+            f"objective={metrics['objective']:.4f}"
+        )
+        model = build_model_from_samples(train_db, best_params)
+        save_model(model)
+        print(f"Saved tuned model to {MODEL_FILE}")
+        return
     else:
         db = load_dataset(MAIN_DATASET_FILE)
 

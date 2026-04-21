@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 
 
-DATASET_FILE = "samples.json"
-HEADER_FILE = "samplesZteAndZcr.h"
+DATASET_FILE = "data/samples.json"
+HEADER_FILE = "include/samplesZteAndZcr.h"
 
 
 def _sanitize_identifier(name: str) -> str:
@@ -18,14 +18,17 @@ def _sanitize_identifier(name: str) -> str:
 
 
 def _format_float(value: float) -> str:
-    return f"{float(value):.8g}f"
+    text = f"{float(value):.8g}"
+    if "." not in text and "e" not in text.lower():
+        text += ".0"
+    return f"{text}f"
 
 
 def export_samples_zte_and_zcr_header(
     dataset_path: str = DATASET_FILE,
     header_path: str = HEADER_FILE,
 ) -> Path:
-    """Export zcr/energy pairs from samples.json into a C header file."""
+    """Export zcr/energy pairs from data/samples.json into a C header file."""
     with open(dataset_path, "r") as f:
         sample_database = json.load(f)
 
@@ -77,6 +80,7 @@ def export_samples_zte_and_zcr_header(
     lines.append("")
 
     out_path = Path(header_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")
     return out_path
 

@@ -2,21 +2,21 @@
 
 import json
 
-from audio import print_input_devices, record_audio, using_serial_input
-from app_config import (
+from core.audio import print_input_devices, record_audio, using_serial_input
+from core.app_config import (
     QUIET_THRESHOLD,
     CLIPPING_THRESHOLD,
+    MODEL_FILE,
     MSG_SERIAL_MODE,
     MSG_TOO_QUIET,
     MSG_CLIPPING,
     MSG_INVALID_CHOICE,
 )
-from features import extract_features
-from recognize import recognize
+from core.features import extract_features
+from core.recognize import recognize
 
 COMMANDS = ["on", "off", "start", "stop", "left", "right", "up", "down"]
 TRIALS_PER_COMMAND = 10
-MODEL_FILE = "model.json"
 
 
 def _load_model():

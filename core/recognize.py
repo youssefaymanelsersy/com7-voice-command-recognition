@@ -1,5 +1,5 @@
 import numpy as np
-from features import extract_features
+from core.features import extract_features
 
 FEATURE_ORDER = ["zcr", "energy", "length", "spectral_centroid"]
 
@@ -18,22 +18,47 @@ FEATURE_FLOORS = {
 }
 
 
-def _command_normalized_distance(feature_vector, cmd_stats, weights):
+def _model_feature_order(model):
+    meta = model.get("meta", {}) if isinstance(model, dict) else {}
+    feature_order = meta.get("feature_order", FEATURE_ORDER)
+    return list(feature_order) if feature_order else FEATURE_ORDER
+
+
+def _coerce_feature_vector(feature_vector, feature_order):
+    if isinstance(feature_vector, dict):
+        return [float(feature_vector.get(feature, 0.0)) for feature in feature_order]
+
+    values = list(feature_vector)
+    if len(values) == len(feature_order):
+        return [float(value) for value in values]
+
+    if len(values) == len(FEATURE_ORDER):
+        by_feature = dict(zip(FEATURE_ORDER, values))
+        return [float(by_feature.get(feature, 0.0)) for feature in feature_order]
+
+    return [float(value) for value in values]
+
+
+def _feature_floor(feature, floors):
+    return float(floors.get(feature, FEATURE_FLOORS[feature]))
+
+
+def _command_normalized_distance(feature_vector, cmd_stats, weights, feature_order, floors):
     total = 0.0
-    for i, feature in enumerate(FEATURE_ORDER):
+    for i, feature in enumerate(feature_order):
         stats = cmd_stats.get(feature, {})
         mean = float(stats.get("mean", 0.0))
-        std = max(float(stats.get("std", 0.0)), FEATURE_FLOORS[feature])
+        std = max(float(stats.get("std", 0.0)), _feature_floor(feature, floors))
         total += float(weights.get(feature, 1.0)) * abs(float(feature_vector[i]) - mean) / std
     return float(total)
 
 
-def _normalize_vector(vector, feature_stats):
+def _normalize_vector(vector, feature_stats, feature_order, floors):
     normalized = []
-    for i, feature in enumerate(FEATURE_ORDER):
+    for i, feature in enumerate(feature_order):
         stats = feature_stats.get(feature, {})
         mean = float(stats.get("mean", 0.0))
-        std = max(float(stats.get("std", 0.0)), FEATURE_FLOORS[feature])
+        std = max(float(stats.get("std", 0.0)), _feature_floor(feature, floors))
         normalized.append((float(vector[i]) - mean) / std)
     return np.array(normalized, dtype=np.float64)
 
@@ -88,10 +113,8 @@ def _legacy_recognize(feature_vector, model):
     return best_cmd or "unknown"
 
 
-def recognize(audio, model):
-    """Recognize command using centroid-first scoring over saved samples."""
-    feature_vector = extract_features(audio)
-
+def recognize_features(feature_vector, model):
+    """Recognize command from a precomputed feature vector."""
     if not isinstance(model, dict) or "commands" not in model:
         return _legacy_recognize(feature_vector, model)
 
@@ -99,17 +122,20 @@ def recognize(audio, model):
     commands = model.get("commands", {})
     command_stats = model.get("command_stats", {})
     feature_stats = model.get("feature_stats", {})
+    feature_order = _model_feature_order(model)
+    feature_vector = _coerce_feature_vector(feature_vector, feature_order)
 
     if not commands:
         return "unknown"
 
     weights = meta.get("feature_weights", FALLBACK_WEIGHTS)
+    floors = meta.get("feature_floors", {})
     k = int(meta.get("k_neighbors", 3))
     unknown_threshold = float(meta.get("unknown_threshold", 7.0))
     min_margin = float(meta.get("min_margin", 0.05))
 
-    weight_arr = np.array([float(weights.get(f, 1.0)) for f in FEATURE_ORDER], dtype=np.float64)
-    query = _normalize_vector(feature_vector, feature_stats)
+    weight_arr = np.array([float(weights.get(f, 1.0)) for f in feature_order], dtype=np.float64)
+    query = _normalize_vector(feature_vector, feature_stats, feature_order, floors)
 
     # Prefer command-specific z-normalized distances when available.
     if command_stats:
@@ -118,7 +144,7 @@ def recognize(audio, model):
             stats = command_stats.get(cmd)
             if not stats:
                 continue
-            score = _command_normalized_distance(feature_vector, stats, weights)
+            score = _command_normalized_distance(feature_vector, stats, weights, feature_order, floors)
             command_scores.append((score, cmd))
 
         if command_scores:
@@ -133,7 +159,7 @@ def recognize(audio, model):
         centroid = info.get("centroid")
         if not centroid:
             continue
-        centroid_vec = _normalize_vector(centroid, feature_stats)
+        centroid_vec = _normalize_vector(centroid, feature_stats, feature_order, floors)
         centroid_dist = float(np.sum(np.abs(query - centroid_vec) * weight_arr))
         centroid_scores.append((centroid_dist, cmd))
 
@@ -154,7 +180,7 @@ def recognize(audio, model):
     for cmd, info in commands.items():
         samples = info.get("samples", [])
         for sample in samples:
-            sample_norm = _normalize_vector(sample, feature_stats)
+            sample_norm = _normalize_vector(sample, feature_stats, feature_order, floors)
             # Weighted L1 distance keeps interpretation simple and robust.
             dist = float(np.sum(np.abs(query - sample_norm) * weight_arr))
             neighbors.append((dist, cmd))
@@ -212,3 +238,8 @@ def recognize(audio, model):
             return centroid_best_cmd if centroid_confident else "unknown"
 
     return centroid_best_cmd if centroid_confident else best_cmd
+
+
+def recognize(audio, model):
+    """Recognize command using centroid-first scoring over saved samples."""
+    return recognize_features(extract_features(audio), model)

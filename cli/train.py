@@ -1,7 +1,7 @@
 # train.py - Legacy training interface (use trainer.py for main training functions)
 # This file provides a simple entry point for the training process.
 
-from trainer import train, retrain_from_saved_samples
+from core.trainer import train, retrain_from_saved_samples
 
 
 def main():

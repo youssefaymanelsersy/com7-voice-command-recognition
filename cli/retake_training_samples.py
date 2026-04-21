@@ -2,14 +2,14 @@ import argparse
 import json
 import os
 import time
+from pathlib import Path
 
-from audio import record_audio, using_serial_input
-from features import extract_features
+from core.audio import record_audio, using_serial_input
+from core.features import extract_features
+from core.trainer import COMMANDS, SAMPLES_PER_COMMAND
 
 
-COMMANDS = ["on", "off", "start", "stop", "left", "right", "up", "down"]
-DATASET_FILE = "test_samples.json"
-SAMPLES_PER_COMMAND = 10
+DATASET_FILE = "data/samples.json"
 
 
 def load_dataset():
@@ -26,6 +26,7 @@ def load_dataset():
 
 
 def save_dataset(dataset):
+    Path(DATASET_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(DATASET_FILE, "w") as f:
         json.dump(dataset, f, indent=2)
 
@@ -71,7 +72,7 @@ def record_for_command(command, sample_count):
     samples = []
     serial_mode = using_serial_input()
     print("\n" + "=" * 55)
-    print(f"Re-recording '{command}' ({sample_count} samples)")
+    print(f"Re-recording TRAINING '{command}' ({sample_count} samples)")
     print("=" * 55)
     if serial_mode:
         print("Serial mode active on COM input. Waiting for board audio automatically...")
@@ -109,7 +110,7 @@ def record_for_command(command, sample_count):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Re-record only selected commands into test_samples.json without touching samples.json."
+        description="Re-record selected commands into TRAINING dataset data/samples.json."
     )
     parser.add_argument(
         "commands",
@@ -120,7 +121,7 @@ def main():
         "--count",
         type=int,
         default=SAMPLES_PER_COMMAND,
-        help="Number of samples to record per selected command (default: 10)",
+        help=f"Number of samples to record per selected command (default: {SAMPLES_PER_COMMAND})",
     )
     args = parser.parse_args()
 
@@ -134,15 +135,15 @@ def main():
 
     dataset = load_dataset()
 
-    print(f"\nSaving updates into {DATASET_FILE}")
+    print(f"\nSaving TRAINING updates into {DATASET_FILE}")
     print(f"Commands being replaced: {', '.join(selected)}")
 
     for command in selected:
         dataset[command] = record_for_command(command, args.count)
 
     save_dataset(dataset)
-    print(f"\nUpdated {DATASET_FILE} successfully.")
-    print("Run autotune.py afterwards to rebuild and search for the best parameters again.")
+    print(f"\nUpdated training dataset {DATASET_FILE} successfully.")
+    print("Run main.py option 2 (Rebuild) to regenerate models.")
 
 
 if __name__ == "__main__":

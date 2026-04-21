@@ -1,10 +1,10 @@
 import json
 import time
+from pathlib import Path
 
 import numpy as np
 
-from audio import record_audio, using_serial_input
-from app_config import (
+from core.app_config import (
     QUIET_THRESHOLD,
     CLIPPING_THRESHOLD,
     MIN_COMMAND_LENGTH,
@@ -12,8 +12,9 @@ from app_config import (
     MSG_TOO_QUIET,
     MSG_CLIPPING,
 )
-from export_samples_header import export_samples_zte_and_zcr_header
-from features import extract_features
+from core.export_model_header import export_voice_model_header
+from core.export_samples_header import export_samples_zte_and_zcr_header
+from core.features import extract_features
 
 # ============================================================================
 # WORKFLOW:
@@ -25,10 +26,12 @@ from features import extract_features
 
 COMMANDS = ["on", "off", "start", "stop", "left", "right", "up", "down"]
 SAMPLES_PER_COMMAND = 20
-DATASET_FILE = "samples.json"
-MODEL_FILE = "model.json"
+DATASET_FILE = "data/samples.json"
+MODEL_FILE = "models/model.json"
+ZCR_ENERGY_MODEL_FILE = "models/model_zcr_energy.json"
 
 FEATURE_ORDER = ["zcr", "energy", "length", "spectral_centroid"]
+ZCR_ENERGY_FEATURE_ORDER = ["zcr", "energy"]
 
 # Keep zero crossing rate as a strong signal.
 FEATURE_WEIGHTS = {
@@ -36,6 +39,11 @@ FEATURE_WEIGHTS = {
     "energy": 0.4,
     "length": 1.8,
     "spectral_centroid": 1.8,
+}
+
+ZCR_ENERGY_FEATURE_WEIGHTS = {
+    "zcr": 1.0,
+    "energy": 1.0,
 }
 
 
@@ -60,15 +68,26 @@ def _filter_command_outliers(vectors, z_limit=2.5):
     return keep
 
 
-def build_model_from_samples(sample_database):
+def build_model_from_samples(
+    sample_database,
+    feature_order=None,
+    feature_weights=None,
+    feature_floors=None,
+    k_neighbors=3,
+    unknown_threshold=7.0,
+    min_margin=0.05,
+):
     """Build a robust model from training samples using all recorded examples."""
+    feature_order = list(feature_order or FEATURE_ORDER)
+    feature_weights = dict(feature_weights or FEATURE_WEIGHTS)
     model = {
         "meta": {
-            "feature_order": FEATURE_ORDER,
-            "feature_weights": FEATURE_WEIGHTS,
-            "k_neighbors": 3,
-            "unknown_threshold": 7.0,
-            "min_margin": 0.05,
+            "feature_order": feature_order,
+            "feature_weights": feature_weights,
+            "feature_floors": dict(feature_floors or {}),
+            "k_neighbors": k_neighbors,
+            "unknown_threshold": unknown_threshold,
+            "min_margin": min_margin,
         },
         "feature_stats": {},
         "command_stats": {},
@@ -84,7 +103,7 @@ def build_model_from_samples(sample_database):
 
         vectors = []
         for sample in samples:
-            vector = [float(sample.get(feature, 0.0)) for feature in FEATURE_ORDER]
+            vector = [float(sample.get(feature, 0.0)) for feature in feature_order]
             vectors.append(vector)
 
         vectors = _filter_command_outliers(vectors)
@@ -99,7 +118,7 @@ def build_model_from_samples(sample_database):
         cmd_arr = np.array(vectors, dtype=np.float64)
 
         stats = {}
-        for i, feature in enumerate(FEATURE_ORDER):
+        for i, feature in enumerate(feature_order):
             stats[feature] = {
                 "mean": float(np.mean(cmd_arr[:, i])),
                 "std": float(np.std(cmd_arr[:, i]) + 1e-6),
@@ -116,15 +135,15 @@ def build_model_from_samples(sample_database):
         all_arr = np.array(all_vectors, dtype=np.float64)
 
         # Use within-command spread so separability between commands is preserved.
-        per_feature_within_stds = {f: [] for f in FEATURE_ORDER}
+        per_feature_within_stds = {f: [] for f in feature_order}
         for cmd, info in model["commands"].items():
             cmd_arr = np.array(info["samples"], dtype=np.float64)
             if len(cmd_arr) < 2:
                 continue
-            for i, feature in enumerate(FEATURE_ORDER):
+            for i, feature in enumerate(feature_order):
                 per_feature_within_stds[feature].append(float(np.std(cmd_arr[:, i])))
 
-        for i, feature in enumerate(FEATURE_ORDER):
+        for i, feature in enumerate(feature_order):
             within = per_feature_within_stds[feature]
             if within:
                 std = float(np.mean(within))
@@ -138,10 +157,28 @@ def build_model_from_samples(sample_database):
     return model
 
 
-def save_model_from_samples(sample_database):
-    model = build_model_from_samples(sample_database)
+def save_model_from_samples(
+    sample_database,
+    model_file=MODEL_FILE,
+    feature_order=None,
+    feature_weights=None,
+    feature_floors=None,
+    k_neighbors=3,
+    unknown_threshold=7.0,
+    min_margin=0.05,
+):
+    model = build_model_from_samples(
+        sample_database,
+        feature_order=feature_order,
+        feature_weights=feature_weights,
+        feature_floors=feature_floors,
+        k_neighbors=k_neighbors,
+        unknown_threshold=unknown_threshold,
+        min_margin=min_margin,
+    )
 
-    with open(MODEL_FILE, "w") as f:
+    Path(model_file).parent.mkdir(parents=True, exist_ok=True)
+    with open(model_file, "w") as f:
         json.dump(model, f, indent=2)
 
     return model
@@ -157,11 +194,14 @@ def retrain_from_saved_samples():
 
     model = save_model_from_samples(sample_database)
     export_samples_zte_and_zcr_header(DATASET_FILE)
+    export_voice_model_header(MODEL_FILE)
     print(f"Rebuilt {MODEL_FILE} from saved samples in {DATASET_FILE}")
     return model
 
 
 def train():
+    from audio import record_audio, using_serial_input
+
     sample_database = {}
     serial_mode = using_serial_input()
 
@@ -208,12 +248,14 @@ def train():
 
         sample_database[cmd] = samples
 
+    Path(DATASET_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(DATASET_FILE, "w") as f:
         json.dump(sample_database, f, indent=2)
 
     export_samples_zte_and_zcr_header(DATASET_FILE)
 
     save_model_from_samples(sample_database)
+    export_voice_model_header(MODEL_FILE)
 
     print(f"\n{'='*50}")
     print("✅ Training complete")

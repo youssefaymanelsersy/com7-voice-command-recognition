@@ -1,17 +1,26 @@
-import sounddevice as sd
 import numpy as np
 import time
 
-FS = 8000
-DURATION = 1
-DEVICE_ID = None
-USB_DEVICE_KEYWORDS = ("usb", "codec", "audio")
-SERIAL_PORT = "COM7"
-SERIAL_BAUDRATE = 115200 * 2
-SERIAL_SAMPLE_WIDTH_BYTES = 1
-SERIAL_START_POLL_SEC = 0.01
-SERIAL_READ_CHUNK_SIZE = 512
-SERIAL_AFTER_START_TIMEOUT_SEC = 8.0
+from core.app_config import (
+    AUDIO_SAMPLE_RATE,
+    RECORD_DURATION_SEC,
+    DEVICE_ID,
+    USB_DEVICE_KEYWORDS,
+    SERIAL_PORT,
+    SERIAL_BAUDRATE,
+    SERIAL_SAMPLE_WIDTH_BYTES,
+    SERIAL_START_POLL_SEC,
+    SERIAL_READ_CHUNK_SIZE,
+    SERIAL_AFTER_START_TIMEOUT_SEC,
+)
+
+try:
+    import sounddevice as sd
+except ImportError:
+    sd = None
+
+FS = AUDIO_SAMPLE_RATE
+DURATION = RECORD_DURATION_SEC
 
 
 def _is_serial_selector(value):
@@ -88,6 +97,12 @@ def using_serial_input(device=None):
 
 def list_input_devices():
     """Return all input-capable devices with useful metadata."""
+    if sd is None:
+        raise RuntimeError(
+            "sounddevice is required for microphone input. Install with: "
+            "python3 -m pip install sounddevice"
+        )
+
     devices = sd.query_devices()
     hostapis = sd.query_hostapis()
     default_input, _ = sd.default.device
@@ -109,7 +124,7 @@ def list_input_devices():
             {
                 "index": idx,
                 "name": dev.get("name", "Unknown"),
-                "hostapi": hostapi_name,
+        "No USB microphone board detected. Connect the board and use main.py (option 9 -> option 2) to see available input devices."
                 "max_input_channels": max_in,
                 "is_default": idx == default_input,
             }
@@ -132,7 +147,7 @@ def print_input_devices():
             f"[{dev['index']}] {dev['name']} | "
             f"Host API: {dev['hostapi']} | "
             f"Input channels: {dev['max_input_channels']}{default_tag}"
-        )
+                    f"Invalid input device '{selected_device}'. Use main.py (option 9 -> option 2) or print_input_devices() to see valid microphones."
 
 
 def _find_usb_input_device():
@@ -156,7 +171,7 @@ def _resolve_recording_device(device):
         return usb_device
 
     raise RuntimeError(
-        "No USB microphone board detected. Connect the board and run test.py (menu option 2) to see available input devices."
+        "No USB microphone board detected. Connect the board and use main.py (option 9 -> option 2) to see available input devices."
     )
 
 
@@ -164,7 +179,7 @@ def record_audio(device=None):
     serial_port = None
     if _is_serial_selector(device):
         serial_port = device
-    elif device is None:
+    elif device is None and _is_serial_selector(SERIAL_PORT):
         serial_port = SERIAL_PORT
 
     print("Recording now...")
@@ -180,7 +195,7 @@ def record_audio(device=None):
                 sd.query_devices(selected_device, "input")
             except Exception as exc:
                 raise ValueError(
-                    f"Invalid input device '{selected_device}'. Run test.py (menu option 2) or print_input_devices() to see valid microphones."
+                    f"Invalid input device '{selected_device}'. Use main.py (option 9 -> option 2) or print_input_devices() to see valid microphones."
                 ) from exc
 
         audio = sd.rec(
