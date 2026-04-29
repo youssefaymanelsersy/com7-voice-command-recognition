@@ -14,37 +14,63 @@ from core.app_config import (
 )
 from core.export_model_header import export_voice_model_header
 from core.export_samples_header import export_samples_zte_and_zcr_header
-from core.features import extract_features
+from core.features import (
+    FRAME_FEATURE_ORDER,
+    average_recording_features,
+    extract_features,
+    extract_frame_features,
+    flatten_frame_features,
+)
 
 # ============================================================================
 # WORKFLOW:
 # 1. train() - Record 20 samples per command once, save to samples.json
-# 2. Modify features.py or build_model_from_samples() as needed
-# 3. retrain_from_saved_samples() - Rebuild model from saved samples.json
-#    (NO re-recording needed, just rebuilds with new logic)
+# 2. Modify trainer/scoring logic as needed
+# 3. retrain_from_saved_samples() - Rebuild model from saved extracted features
+#    (NO re-recording needed, but this does not recreate raw-waveform features)
 # ============================================================================
 
 COMMANDS = ["on", "off", "start", "stop", "left", "right", "up", "down"]
 SAMPLES_PER_COMMAND = 20
 DATASET_FILE = "data/samples.json"
+FRAME_AVERAGE_FILE = "data/frame_feature_averages.json"
 MODEL_FILE = "models/model.json"
 ZCR_ENERGY_MODEL_FILE = "models/model_zcr_energy.json"
 
-FEATURE_ORDER = ["zcr", "energy", "length", "spectral_centroid"]
-ZCR_ENERGY_FEATURE_ORDER = ["zcr", "energy"]
+FEATURE_ORDER = FRAME_FEATURE_ORDER + ["length", "spectral_centroid"]
+ZCR_ENERGY_FEATURE_ORDER = FRAME_FEATURE_ORDER
 
-# Keep zero crossing rate as a strong signal.
+# Keep zero crossing rate as a strong signal. STE needs sufficient weight (1.0, not 0.4)
+# to contribute meaningfully after normalization by its large standard deviations (~8 billion).
 FEATURE_WEIGHTS = {
-    "zcr": 2.0,
-    "energy": 0.4,
+    **{feature: 2.0 for feature in FRAME_FEATURE_ORDER if feature.startswith("zcr_")},
+    **{feature: 1.0 for feature in FRAME_FEATURE_ORDER if feature.startswith("ste_")},
     "length": 1.8,
     "spectral_centroid": 1.8,
 }
 
 ZCR_ENERGY_FEATURE_WEIGHTS = {
-    "zcr": 1.0,
-    "energy": 1.0,
+    **{feature: 2.0 for feature in FRAME_FEATURE_ORDER if feature.startswith("zcr_")},
+    **{feature: 1.0 for feature in FRAME_FEATURE_ORDER if feature.startswith("ste_")},
 }
+
+
+def _rebuild_frame_averages(sample_database):
+    """Build zcr_avg/ste_avg per command from stored recording frame features."""
+    out = {}
+    has_frame_data = False
+    for cmd in COMMANDS:
+        samples = sample_database.get(cmd, [])
+        frame_ready = [
+            sample
+            for sample in samples
+            if isinstance(sample, dict)
+            and "zcr_features" in sample
+            and "ste_features" in sample
+        ]
+        has_frame_data = has_frame_data or bool(frame_ready)
+        out[cmd] = average_recording_features(frame_ready)
+    return out if has_frame_data else None
 
 
 def _filter_command_outliers(vectors, z_limit=2.5):
@@ -68,14 +94,32 @@ def _filter_command_outliers(vectors, z_limit=2.5):
     return keep
 
 
+def _sample_feature_value(sample, feature):
+    flattened = None
+
+    if "zcr_features" in sample or "ste_features" in sample:
+        flattened = flatten_frame_features(sample)
+        if feature in flattened:
+            return float(flattened[feature])
+
+    if feature in sample:
+        return float(sample.get(feature, 0.0))
+
+    return 0.0
+
+
+def sample_to_feature_vector(sample, feature_order):
+    return [_sample_feature_value(sample, feature) for feature in feature_order]
+
+
 def build_model_from_samples(
     sample_database,
     feature_order=None,
     feature_weights=None,
     feature_floors=None,
     k_neighbors=3,
-    unknown_threshold=7.0,
-    min_margin=0.05,
+    unknown_threshold=60.0,
+    min_margin=2.0,
 ):
     """Build a robust model from training samples using all recorded examples."""
     feature_order = list(feature_order or FEATURE_ORDER)
@@ -103,7 +147,7 @@ def build_model_from_samples(
 
         vectors = []
         for sample in samples:
-            vector = [float(sample.get(feature, 0.0)) for feature in feature_order]
+            vector = sample_to_feature_vector(sample, feature_order)
             vectors.append(vector)
 
         vectors = _filter_command_outliers(vectors)
@@ -149,9 +193,15 @@ def build_model_from_samples(
                 std = float(np.mean(within))
             else:
                 std = float(np.std(all_arr[:, i]))
+            # Use relative epsilon for large values, absolute for small ones
+            mean_val = float(np.mean(all_arr[:, i]))
+            if abs(mean_val) > 1e6:
+                epsilon = max(std * 1e-6, 1e-9)  # Relative epsilon for large values
+            else:
+                epsilon = 1e-6  # Absolute epsilon for small values
             model["feature_stats"][feature] = {
-                "mean": float(np.mean(all_arr[:, i])),
-                "std": float(std + 1e-6),
+                "mean": mean_val,
+                "std": float(std + epsilon),
             }
 
     return model
@@ -164,8 +214,8 @@ def save_model_from_samples(
     feature_weights=None,
     feature_floors=None,
     k_neighbors=3,
-    unknown_threshold=7.0,
-    min_margin=0.05,
+    unknown_threshold=60.0,
+    min_margin=2.0,
 ):
     model = build_model_from_samples(
         sample_database,
@@ -193,9 +243,16 @@ def retrain_from_saved_samples():
         return None
 
     model = save_model_from_samples(sample_database)
+
+    frame_averages = _rebuild_frame_averages(sample_database)
+    if frame_averages is not None:
+        Path(FRAME_AVERAGE_FILE).parent.mkdir(parents=True, exist_ok=True)
+        with open(FRAME_AVERAGE_FILE, "w") as f:
+            json.dump(frame_averages, f, indent=2)
+
     export_samples_zte_and_zcr_header(DATASET_FILE)
     export_voice_model_header(MODEL_FILE)
-    print(f"Rebuilt {MODEL_FILE} from saved samples in {DATASET_FILE}")
+    print(f"Rebuilt {MODEL_FILE} from saved extracted features in {DATASET_FILE}")
     return model
 
 
@@ -203,6 +260,7 @@ def train():
     from audio import record_audio, using_serial_input
 
     sample_database = {}
+    word_averages = {}
     serial_mode = using_serial_input()
 
     if serial_mode:
@@ -231,6 +289,7 @@ def train():
                 continue
 
             zcr, energy, length, centroid = extract_features(audio)
+            frame_features = extract_frame_features(audio)
 
             if length < MIN_COMMAND_LENGTH:
                 print("Too short - speak clearly")
@@ -239,18 +298,26 @@ def train():
             print(f"✓ Accepted")
 
             samples.append({
-                "zcr": float(zcr),
-                "energy": float(energy),
-                "length": float(length),
-                "spectral_centroid": float(centroid),
+                "zcr": int(zcr),
+                "energy": int(energy),
+                "length": int(length),
+                "spectral_centroid": int(centroid),
+                # Store intermediate frame-wise features per recording.
+                "zcr_features": [int(v) for v in frame_features["zcr_features"]],
+                "ste_features": [int(v) for v in frame_features["ste_features"]],
             })
             i += 1
 
         sample_database[cmd] = samples
+        word_averages[cmd] = average_recording_features(samples)
 
     Path(DATASET_FILE).parent.mkdir(parents=True, exist_ok=True)
     with open(DATASET_FILE, "w") as f:
         json.dump(sample_database, f, indent=2)
+
+    if any(samples and "zcr_features" in samples[0] for samples in sample_database.values()):
+        with open(FRAME_AVERAGE_FILE, "w") as f:
+            json.dump(word_averages, f, indent=2)
 
     export_samples_zte_and_zcr_header(DATASET_FILE)
 
@@ -259,5 +326,5 @@ def train():
 
     print(f"\n{'='*50}")
     print("✅ Training complete")
-    print(f"Saved: {DATASET_FILE}, {MODEL_FILE}")
+    print(f"Saved: {DATASET_FILE}, {FRAME_AVERAGE_FILE}, {MODEL_FILE}")
     print('='*50)

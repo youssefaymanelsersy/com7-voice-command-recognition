@@ -78,13 +78,12 @@ def _record_audio_from_serial(port):
 
     serial_bytes = bytes(raw[:expected_bytes])
     if SERIAL_SAMPLE_WIDTH_BYTES == 1:
-        pcm = np.frombuffer(serial_bytes, dtype=np.uint8).astype(np.float32)
-        # Convert unsigned 8-bit PCM to [-1, 1] and remove DC bias from MCU streams.
-        pcm = (pcm - 128.0) / 128.0
-        return pcm - float(np.mean(pcm))
+        pcm_u8 = np.frombuffer(serial_bytes, dtype=np.uint8).astype(np.int32)
+        pcm_i16 = (pcm_u8 - 128) << 8
+        return pcm_i16.astype(np.int16)
 
     pcm = np.frombuffer(serial_bytes, dtype="<i2")
-    return pcm.astype(np.float32) / 32768.0
+    return pcm.astype(np.int16)
 
 
 def using_serial_input(device=None):
@@ -124,7 +123,7 @@ def list_input_devices():
             {
                 "index": idx,
                 "name": dev.get("name", "Unknown"),
-        "No USB microphone board detected. Connect the board and use main.py (option 9 -> option 2) to see available input devices."
+                "hostapi": hostapi_name,
                 "max_input_channels": max_in,
                 "is_default": idx == default_input,
             }
@@ -147,7 +146,7 @@ def print_input_devices():
             f"[{dev['index']}] {dev['name']} | "
             f"Host API: {dev['hostapi']} | "
             f"Input channels: {dev['max_input_channels']}{default_tag}"
-                    f"Invalid input device '{selected_device}'. Use main.py (option 9 -> option 2) or print_input_devices() to see valid microphones.")
+        )
 
 
 def _find_usb_input_device():
@@ -203,21 +202,15 @@ def record_audio(device=None):
             samplerate=FS,
             channels=1,
             device=selected_device,
-            dtype='float32'
+            dtype='int16'
         )
 
         sd.wait()
         audio = audio.flatten()
 
-    raw_max = np.max(np.abs(audio))
+    raw_max = int(np.max(np.abs(audio)))
     print("Max amplitude:", raw_max)
-
-    # normalize AFTER measuring
-    if raw_max > 0:
-        norm_audio = audio / (raw_max + 1e-6)
-    else:
-        norm_audio = audio
 
     print("Done recording")
 
-    return audio, norm_audio, raw_max
+    return audio, audio, raw_max

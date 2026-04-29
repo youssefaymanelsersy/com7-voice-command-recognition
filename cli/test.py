@@ -12,8 +12,8 @@ from core.app_config import (
     MSG_CLIPPING,
     MSG_INVALID_CHOICE,
 )
-from core.features import extract_features
-from core.recognize import recognize
+from core.features import extract_features, extract_frame_features
+from core.recognize import recognize_features
 
 COMMANDS = ["on", "off", "start", "stop", "left", "right", "up", "down"]
 TRIALS_PER_COMMAND = 10
@@ -44,7 +44,7 @@ def test_input_level():
         print(MSG_TOO_QUIET)
         return False
 
-    print(f"Input working (level: {max_amp:.4f})")
+    print(f"Input working (level: {max_amp})")
     return True
 
 
@@ -57,8 +57,10 @@ def test_features():
         print(MSG_TOO_QUIET)
         return False
 
+    frame_features = extract_frame_features(audio)
     zcr, energy, length, centroid = extract_features(audio)
-    print(f"Features: ZCR={zcr:.4f}, Energy={energy:.4f}, Length={length:.0f}, Centroid={centroid:.0f}")
+    print(f"Features: ZCR={zcr}, Energy={energy}, Length={length}, Centroid={centroid}")
+    print(f"Frame ZCR count: {len(frame_features['zcr_features'])}, Frame STE count: {len(frame_features['ste_features'])}")
     print("Features extracted")
     return True
 
@@ -85,7 +87,7 @@ def test_recognition_once():
         print(MSG_TOO_QUIET)
         return False
 
-    result = recognize(audio, model)
+    result = recognize_features(extract_frame_features(audio), model)
     print(f"Recognition result: {result}")
     return True
 
@@ -125,7 +127,7 @@ def run_one_shot_capture():
         device = int(device)
 
     _, _, max_amp = record_audio(device=device)
-    print(f"Captured max amplitude: {max_amp:.6f}")
+    print(f"Captured max amplitude: {max_amp}")
 
 
 def _choose_command():
@@ -170,7 +172,7 @@ def run_command_trials():
             elif (not serial_mode) and max_amp > CLIPPING_THRESHOLD:
                 prediction = "clipped"
             else:
-                prediction = recognize(audio, model)
+                prediction = recognize_features(extract_frame_features(audio), model)
 
             results.append(prediction)
             print(f"Trial {trial}: {prediction}")

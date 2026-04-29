@@ -10,7 +10,7 @@ def main():
     print("VOICE COMMAND RECOGNITION - TRAINING SYSTEM")
     print("="*60)
     print("\n1. Train new model (collect new samples)")
-    print("2. Rebuild model from saved samples")
+    print("2. Rebuild model from saved extracted features")
     print("3. Exit")
     print()
     

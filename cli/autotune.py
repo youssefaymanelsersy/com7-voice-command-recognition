@@ -4,18 +4,30 @@ from pathlib import Path
 
 import numpy as np
 
+from core.app_config import CLIPPING_THRESHOLD, QUIET_THRESHOLD
 from core.export_model_header import export_voice_model_header
 from core.features import extract_features
 from core.recognize import recognize_features
+from core.trainer import FEATURE_ORDER, build_model_from_samples, sample_to_feature_vector
 
 
 COMMANDS = ["on", "off", "start", "stop", "left", "right", "up", "down"]
-FEATURE_ORDER = ["zcr", "energy", "length", "spectral_centroid"]
 
 TEST_DATASET_FILE = "data/test_samples.json"
 MAIN_DATASET_FILE = "data/samples.json"
 MODEL_FILE = "models/model.json"
 SAMPLES_PER_COMMAND = 10
+
+
+def _frame_weight_map(zcr_weight, ste_weight, include_scalars=True, length_weight=1.8, centroid_weight=1.8):
+    weights = {
+        **{feature: zcr_weight for feature in FEATURE_ORDER if feature.startswith("zcr_")},
+        **{feature: ste_weight for feature in FEATURE_ORDER if feature.startswith("ste_")},
+    }
+    if include_scalars:
+        weights["length"] = length_weight
+        weights["spectral_centroid"] = centroid_weight
+    return weights
 
 
 def _filter_command_outliers(vectors, z_limit=2.5):
@@ -35,76 +47,6 @@ def _filter_command_outliers(vectors, z_limit=2.5):
     if len(keep) < max(5, len(vectors) // 2):
         return vectors
     return keep
-
-
-def build_model_from_samples(sample_database, params):
-    model = {
-        "meta": {
-            "feature_order": FEATURE_ORDER,
-            "feature_weights": params["feature_weights"],
-            "feature_floors": params.get("feature_floors", {}),
-            "k_neighbors": params["k_neighbors"],
-            "unknown_threshold": params["unknown_threshold"],
-            "min_margin": params["min_margin"],
-        },
-        "feature_stats": {},
-        "command_stats": {},
-        "commands": {},
-    }
-
-    all_vectors = []
-    for cmd in COMMANDS:
-        samples = sample_database.get(cmd, [])
-        if not samples:
-            continue
-
-        vectors = []
-        for sample in samples:
-            vectors.append([float(sample.get(f, 0.0)) for f in FEATURE_ORDER])
-
-        vectors = _filter_command_outliers(vectors)
-        if not vectors:
-            continue
-
-        all_vectors.extend(vectors)
-        centroid = np.mean(vectors, axis=0).tolist()
-        cmd_arr = np.array(vectors, dtype=np.float64)
-
-        stats = {}
-        for i, feature in enumerate(FEATURE_ORDER):
-            stats[feature] = {
-                "mean": float(np.mean(cmd_arr[:, i])),
-                "std": float(np.std(cmd_arr[:, i]) + 1e-6),
-            }
-
-        model["command_stats"][cmd] = stats
-        model["commands"][cmd] = {
-            "samples": vectors,
-            "centroid": [float(v) for v in centroid],
-        }
-
-    if not all_vectors:
-        return model
-
-    all_arr = np.array(all_vectors, dtype=np.float64)
-
-    per_feature_within_stds = {f: [] for f in FEATURE_ORDER}
-    for cmd, info in model["commands"].items():
-        cmd_arr = np.array(info["samples"], dtype=np.float64)
-        if len(cmd_arr) < 2:
-            continue
-        for i, feature in enumerate(FEATURE_ORDER):
-            per_feature_within_stds[feature].append(float(np.std(cmd_arr[:, i])))
-
-    for i, feature in enumerate(FEATURE_ORDER):
-        within = per_feature_within_stds[feature]
-        std = float(np.mean(within)) if within else float(np.std(all_arr[:, i]))
-        model["feature_stats"][feature] = {
-            "mean": float(np.mean(all_arr[:, i])),
-            "std": float(std + 1e-6),
-        }
-
-    return model
 
 
 def _normalize_vector(vector, feature_stats):
@@ -144,8 +86,16 @@ def loocv_score(sample_database, params):
                 else:
                     train_db[c2] = vals[:]
 
-            model = build_model_from_samples(train_db, params)
-            feature_vec = [float(samples[i].get(f, 0.0)) for f in FEATURE_ORDER]
+            model = build_model_from_samples(
+                train_db,
+                feature_order=FEATURE_ORDER,
+                feature_weights=params["feature_weights"],
+                feature_floors=params.get("feature_floors", {}),
+                k_neighbors=params["k_neighbors"],
+                unknown_threshold=params["unknown_threshold"],
+                min_margin=params["min_margin"],
+            )
+            feature_vec = sample_to_feature_vector(samples[i], FEATURE_ORDER)
             pred = predict_feature_vector(feature_vec, model)
 
             total += 1
@@ -171,16 +121,17 @@ def search_best_params(sample_database):
         for len_w in [1.0, 1.4, 1.8]:
             for cent_w in [1.2, 1.8, 2.4]:
                 for k in [3, 5, 7]:
-                    for thr in [5.5, 6.0, 6.5, 7.0]:
-                        for margin in [0.05, 0.08, 0.12]:
+                    for thr in [30.0, 45.0, 60.0, 80.0]:
+                        for margin in [0.0, 1.0, 2.0, 5.0]:
                             grid.append(
                                 {
-                                    "feature_weights": {
-                                        "zcr": zcr_w,
-                                        "energy": 0.4,
-                                        "length": len_w,
-                                        "spectral_centroid": cent_w,
-                                    },
+                                    "feature_weights": _frame_weight_map(
+                                        zcr_w,
+                                        0.4,
+                                        include_scalars=True,
+                                        length_weight=len_w,
+                                        centroid_weight=cent_w,
+                                    ),
                                     "k_neighbors": k,
                                     "unknown_threshold": thr,
                                     "min_margin": margin,
@@ -202,14 +153,22 @@ def search_best_params(sample_database):
 
 
 def validation_score(train_database, validation_database, params):
-    model = build_model_from_samples(train_database, params)
+    model = build_model_from_samples(
+        train_database,
+        feature_order=FEATURE_ORDER,
+        feature_weights=params["feature_weights"],
+        feature_floors=params.get("feature_floors", {}),
+        k_neighbors=params["k_neighbors"],
+        unknown_threshold=params["unknown_threshold"],
+        min_margin=params["min_margin"],
+    )
     total = 0
     correct = 0
     unknown = 0
 
     for cmd in COMMANDS:
         for sample in validation_database.get(cmd, []):
-            feature_vec = [float(sample.get(f, 0.0)) for f in FEATURE_ORDER]
+            feature_vec = sample_to_feature_vector(sample, FEATURE_ORDER)
             pred = predict_feature_vector(feature_vec, model)
             total += 1
             if pred == cmd:
@@ -236,16 +195,17 @@ def search_best_validation_params(train_database, validation_database):
             for len_w in [0.8, 1.4, 2.0]:
                 for cent_w in [0.8, 1.4, 2.0, 2.8]:
                     for k in [1, 3, 5]:
-                        for thr in [3.5, 5.0, 6.5, 8.0, 10.0]:
-                            for margin in [0.02, 0.05, 0.1]:
+                        for thr in [30.0, 45.0, 60.0, 80.0, 100.0]:
+                            for margin in [0.0, 1.0, 2.0, 5.0]:
                                 grid.append(
                                     {
-                                        "feature_weights": {
-                                            "zcr": zcr_w,
-                                            "energy": energy_w,
-                                            "length": len_w,
-                                            "spectral_centroid": cent_w,
-                                        },
+                                        "feature_weights": _frame_weight_map(
+                                            zcr_w,
+                                            energy_w,
+                                            include_scalars=True,
+                                            length_weight=len_w,
+                                            centroid_weight=cent_w,
+                                        ),
                                         "k_neighbors": k,
                                         "unknown_threshold": thr,
                                         "min_margin": margin,
@@ -267,7 +227,8 @@ def search_best_validation_params(train_database, validation_database):
 
 
 def record_80_samples(output_file=TEST_DATASET_FILE):
-    from audio import record_audio, using_serial_input
+    from core.audio import record_audio, using_serial_input
+    from core.features import extract_frame_features
 
     serial_mode = using_serial_input()
     print("Recording 10 samples per command (80 total).")
@@ -289,24 +250,27 @@ def record_80_samples(output_file=TEST_DATASET_FILE):
             time.sleep(0.3)
 
             _, audio, max_amp = record_audio()
-            if max_amp < 0.03:
+            if max_amp < QUIET_THRESHOLD:
                 print("Too quiet. Retry.")
                 continue
-            if (not serial_mode) and max_amp > 0.95:
+            if (not serial_mode) and max_amp > CLIPPING_THRESHOLD:
                 print("Clipping. Retry.")
                 continue
 
             zcr, energy, length, centroid = extract_features(audio)
+            frame_features = extract_frame_features(audio)
             if length < 4000:
                 print("Too short/noisy. Retry.")
                 continue
 
             db[cmd].append(
                 {
-                    "zcr": float(zcr),
-                    "energy": float(energy),
-                    "length": float(length),
-                    "spectral_centroid": float(centroid),
+                    "zcr": int(zcr),
+                    "energy": int(energy),
+                    "length": int(length),
+                    "spectral_centroid": int(centroid),
+                    "zcr_features": [int(v) for v in frame_features["zcr_features"]],
+                    "ste_features": [int(v) for v in frame_features["ste_features"]],
                 }
             )
             print("Accepted")
@@ -358,7 +322,15 @@ def main():
             f"unknown={metrics['unknown_rate']*100:.1f}% | "
             f"objective={metrics['objective']:.4f}"
         )
-        model = build_model_from_samples(train_db, best_params)
+        model = build_model_from_samples(
+            train_db,
+            feature_order=FEATURE_ORDER,
+            feature_weights=best_params["feature_weights"],
+            feature_floors=best_params.get("feature_floors", {}),
+            k_neighbors=best_params["k_neighbors"],
+            unknown_threshold=best_params["unknown_threshold"],
+            min_margin=best_params["min_margin"],
+        )
         save_model(model)
         print(f"Saved tuned model to {MODEL_FILE}")
         return
@@ -377,7 +349,15 @@ def main():
         f"objective={metrics['objective']:.4f}"
     )
 
-    model = build_model_from_samples(db, best_params)
+    model = build_model_from_samples(
+        db,
+        feature_order=FEATURE_ORDER,
+        feature_weights=best_params["feature_weights"],
+        feature_floors=best_params.get("feature_floors", {}),
+        k_neighbors=best_params["k_neighbors"],
+        unknown_threshold=best_params["unknown_threshold"],
+        min_margin=best_params["min_margin"],
+    )
     save_model(model)
     print(f"Saved tuned model to {MODEL_FILE}")
 

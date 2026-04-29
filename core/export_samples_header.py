@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+from core.features import FRAME_COUNT
+
 
 DATASET_FILE = "data/samples.json"
 HEADER_FILE = "include/samplesZteAndZcr.h"
@@ -37,9 +39,13 @@ def export_samples_zte_and_zcr_header(
     lines.append("#ifndef SAMPLES_ZTE_AND_ZCR_H")
     lines.append("#define SAMPLES_ZTE_AND_ZCR_H")
     lines.append("")
+    lines.append("#include <stdint.h>")
+    lines.append("")
     lines.append("typedef struct {")
-    lines.append("    float zcr;")
-    lines.append("    float energy;")
+    lines.append("    int32_t zcr;")
+    lines.append("    int64_t energy;")
+    lines.append(f"    int32_t zcr_features[{FRAME_COUNT}];")
+    lines.append(f"    int64_t ste_features[{FRAME_COUNT}];")
     lines.append("} SampleZteAndZcr;")
     lines.append("")
     lines.append("typedef struct {")
@@ -57,9 +63,20 @@ def export_samples_zte_and_zcr_header(
 
         lines.append(f"static const SampleZteAndZcr {array_name}[] = {{")
         for sample in samples:
-            zcr = _format_float(sample.get("zcr", 0.0))
-            energy = _format_float(sample.get("energy", 0.0))
-            lines.append(f"    {{{zcr}, {energy}}},")
+            zcr = int(sample.get("zcr", 0))
+            energy = int(sample.get("energy", 0))
+            zcr_features = ", ".join(str(int(value)) for value in sample.get("zcr_features", [0] * FRAME_COUNT)[:FRAME_COUNT])
+            ste_features = ", ".join(str(int(value)) for value in sample.get("ste_features", [0] * FRAME_COUNT)[:FRAME_COUNT])
+            lines.append(
+                "    {"
+                + f"{zcr}, {energy}, "
+                + "{"
+                + zcr_features
+                + "}, {"
+                + ste_features
+                + "}"
+                + "},"
+            )
         lines.append("};")
         lines.append("")
 

@@ -109,10 +109,36 @@ VOICE_AUDIO_SAMPLE_RATE=8000
 VOICE_RECORD_DURATION_SEC=1
 VOICE_DEVICE_ID=2
 VOICE_MODEL_FILE=models/model.json
+VOICE_PROCESSED_SIGNAL_TX_PORT=COM8
+VOICE_PROCESSED_SIGNAL_TX_BAUDRATE=115200
 ```
 
 Set `VOICE_SERIAL_PORT=""` to use a microphone input instead of serial mode.
 Set `VOICE_MODEL_FILE=models/model_zcr_energy.json` to run the ZCR/energy-only model.
+Set `VOICE_PROCESSED_SIGNAL_TX_PORT=COMx` to stream processed samples as `START`/`END` framed integers.
+
+## Processed Signal Playback (Serial)
+
+When `VOICE_PROCESSED_SIGNAL_TX_PORT` is set, option 3 in `main.py` sends the processed signal buffer only after full processing completes.
+
+Frame format:
+
+```text
+START
+sample_1
+sample_2
+...
+sample_N
+END
+```
+
+PC-side playback:
+
+```bash
+python -m cli.play_processed_signal --port COM8 --baudrate 115200 --sample-rate 8000
+```
+
+The player waits for `END` before playback.
 
 ## ZCR + Energy Model
 
@@ -144,6 +170,14 @@ VOICE_MODEL_FILE=models/model_zcr_energy.json .venv/bin/python main.py
 - `core/recognize.py` - Command recognition logic
 - `core/features.py` - Feature extraction logic
 
+Frame extraction uses fixed non-overlapping windows per recording:
+
+- 8000 total samples per recording
+- 32 frames
+- 250 samples per frame
+- Per-recording outputs: `zcr_features[32]` and `ste_features[32]`
+- Per-word outputs (after 20 recordings): `zcr_avg[32]` and `ste_avg[32]`
+
 ### Utilities
 
 - `cli/autotune.py` - Parameter search/tuning workflow
@@ -157,6 +191,7 @@ VOICE_MODEL_FILE=models/model_zcr_energy.json .venv/bin/python main.py
 ### Data Files
 
 - `data/samples.json` - Main training recordings
+- `data/frame_feature_averages.json` - Per-word frame averages (`zcr_avg` and `ste_avg`, each size 32)
 - `data/test_samples.json` - Separate autotune/test recordings
 - `models/model.json` - Active trained model
 - `models/model_zcr_energy.json` - Separate model using only ZCR and energy

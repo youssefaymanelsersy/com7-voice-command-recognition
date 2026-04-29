@@ -5,7 +5,8 @@ import time
 from pathlib import Path
 
 from core.audio import record_audio, using_serial_input
-from core.features import extract_features
+from core.app_config import CLIPPING_THRESHOLD, QUIET_THRESHOLD
+from core.features import extract_features, extract_frame_features
 
 
 COMMANDS = ["on", "off", "start", "stop", "left", "right", "up", "down"]
@@ -84,24 +85,27 @@ def record_for_command(command, sample_count):
         time.sleep(0.3)
 
         _, audio, max_amp = record_audio()
-        if max_amp < 0.03:
+        if max_amp < QUIET_THRESHOLD:
             print("Too quiet. Retry.")
             continue
-        if (not serial_mode) and max_amp > 0.95:
+        if (not serial_mode) and max_amp > CLIPPING_THRESHOLD:
             print("Clipping. Retry.")
             continue
 
         zcr, energy, length, centroid = extract_features(audio)
+        frame_features = extract_frame_features(audio)
         if length < 4000:
             print("Too short/noisy. Retry.")
             continue
 
         samples.append(
             {
-                "zcr": float(zcr),
-                "energy": float(energy),
-                "length": float(length),
-                "spectral_centroid": float(centroid),
+                "zcr": int(zcr),
+                "energy": int(energy),
+                "length": int(length),
+                "spectral_centroid": int(centroid),
+                "zcr_features": [int(v) for v in frame_features["zcr_features"]],
+                "ste_features": [int(v) for v in frame_features["ste_features"]],
             }
         )
         print("Accepted")

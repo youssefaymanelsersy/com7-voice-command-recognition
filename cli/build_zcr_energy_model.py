@@ -13,6 +13,7 @@ from core.trainer import (
     ZCR_ENERGY_FEATURE_ORDER,
     ZCR_ENERGY_MODEL_FILE,
     build_model_from_samples,
+    sample_to_feature_vector,
 )
 
 
@@ -26,7 +27,21 @@ def _load_dataset(path):
 
 
 def _feature_vector(sample):
-    return [float(sample.get(feature, 0.0)) for feature in ZCR_ENERGY_FEATURE_ORDER]
+    return sample_to_feature_vector(sample, ZCR_ENERGY_FEATURE_ORDER)
+
+
+def _frame_weight_map(zcr_weight, ste_weight):
+    return {
+        **{feature: zcr_weight for feature in ZCR_ENERGY_FEATURE_ORDER if feature.startswith("zcr_")},
+        **{feature: ste_weight for feature in ZCR_ENERGY_FEATURE_ORDER if feature.startswith("ste_")},
+    }
+
+
+def _frame_floor_map(zcr_floor, ste_floor):
+    return {
+        **{feature: zcr_floor for feature in ZCR_ENERGY_FEATURE_ORDER if feature.startswith("zcr_")},
+        **{feature: ste_floor for feature in ZCR_ENERGY_FEATURE_ORDER if feature.startswith("ste_")},
+    }
 
 
 def _build_search_context(model, validation_db):
@@ -238,17 +253,15 @@ def search_best_params(model, validation_db):
             for zcr_floor in [0.005, 0.01, 0.015]:
                 for energy_floor in [0.005, 0.01, 0.02]:
                     for k in [3, 5, 7]:
-                        for threshold in [1.0, 1.25, 1.5, 1.75, 2.0]:
-                            for margin in [0.0, 0.02, 0.05]:
+                        for threshold in [30.0, 45.0, 60.0, 80.0, 100.0]:
+                            for margin in [0.0, 1.0, 2.0, 5.0]:
                                 grid.append(
                                     {
                                         "feature_weights": {
-                                            "zcr": zcr_w,
-                                            "energy": energy_w,
+                                            **_frame_weight_map(zcr_w, energy_w),
                                         },
                                         "feature_floors": {
-                                            "zcr": zcr_floor,
-                                            "energy": energy_floor,
+                                            **_frame_floor_map(zcr_floor, energy_floor),
                                         },
                                         "k_neighbors": k,
                                         "unknown_threshold": threshold,
@@ -280,13 +293,12 @@ def search_fast_params(model, validation_db):
     for zcr_w in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0]:
         for energy_w in [0.0, 0.2, 0.4, 0.8, 1.2, 1.8, 2.5, 3.5]:
             for k in [1, 3, 5, 7]:
-                for threshold in [1.5, 2.0, 2.5, 3.0, 4.0, 5.5, 7.0, 9.0]:
-                    for margin in [0.02, 0.05, 0.1, 0.2, 0.35]:
+                for threshold in [30.0, 45.0, 60.0, 80.0, 100.0, 120.0]:
+                    for margin in [0.0, 1.0, 2.0, 5.0]:
                         grid.append(
                             {
                                 "feature_weights": {
-                                    "zcr": zcr_w,
-                                    "energy": energy_w,
+                                    **_frame_weight_map(zcr_w, energy_w),
                                 },
                                 "k_neighbors": k,
                                 "unknown_threshold": threshold,
@@ -331,10 +343,10 @@ def main():
     base_model = build_model_from_samples(
         train_db,
         feature_order=ZCR_ENERGY_FEATURE_ORDER,
-        feature_weights={"zcr": 1.0, "energy": 1.0},
+        feature_weights=_frame_weight_map(1.0, 1.0),
         k_neighbors=3,
-        unknown_threshold=3.0,
-        min_margin=0.05,
+        unknown_threshold=60.0,
+        min_margin=2.0,
     )
     if args.fast:
         best_params, metrics, top = search_fast_params(base_model, validation_db)

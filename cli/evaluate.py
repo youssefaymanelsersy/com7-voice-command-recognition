@@ -4,16 +4,12 @@ import argparse
 import json
 from collections import Counter, defaultdict
 
-from core.recognize import FEATURE_ORDER, recognize_features
+from core.recognize import recognize_features
 
 
 def _load_json(path):
     with open(path, "r") as f:
         return json.load(f)
-
-
-def _feature_vector(sample):
-    return [float(sample.get(feature, 0.0)) for feature in FEATURE_ORDER]
 
 
 def evaluate_model(model_path="models/model.json", dataset_path="data/test_samples.json"):
@@ -33,7 +29,7 @@ def evaluate_model(model_path="models/model.json", dataset_path="data/test_sampl
         command_unknown = 0
 
         for sample in dataset.get(expected, []):
-            prediction = recognize_features(_feature_vector(sample), model)
+            prediction = recognize_features(sample, model)
             predictions.append(prediction)
             confusion[expected][prediction] += 1
 

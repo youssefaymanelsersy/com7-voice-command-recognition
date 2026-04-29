@@ -19,6 +19,11 @@ def _sanitize_identifier(name):
     return ident or "cmd"
 
 
+def _header_guard(path):
+    ident = _sanitize_identifier(Path(path).name).upper()
+    return ident or "VOICE_MODEL_H"
+
+
 def _format_float(value):
     text = f"{float(value):.8g}"
     if "." not in text and "e" not in text.lower():
@@ -58,9 +63,10 @@ def export_voice_model_header(model_path=MODEL_FILE, header_path=HEADER_FILE):
     feature_count = len(feature_order)
     command_count = len(command_names)
 
+    guard = _header_guard(header_path)
     lines = [
-        "#ifndef VOICE_MODEL_H",
-        "#define VOICE_MODEL_H",
+        f"#ifndef {guard}",
+        f"#define {guard}",
         "",
         f"/* Generated from {Path(model_path).as_posix()}. Keep feature extraction in sync with features.py. */",
         f"#define VOICE_MODEL_FEATURE_COUNT {feature_count}",
